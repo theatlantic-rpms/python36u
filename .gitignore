@@ -1,7 +1,3 @@
-BUILD
-BUILDROOT
-MOCK
-RPMS
-SOURCES/*.tar.xz
-SOURCES/*.whl
-SRPMS
+*.tar.xz
+*.rpm
+results_*

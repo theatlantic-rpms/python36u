@@ -2,6 +2,40 @@
 # Conditionals and other variables controlling the build
 # ======================================================
 
+# NOTES ON BOOTSTRAPING PYTHON 3.6:
+#
+# Due to a dependency cycle between Python, gdb, rpm, pip, setuptools, wheel,
+# and other packages, in order to rebase Python 3 one has to build in the
+# following order:
+#
+# 1. At the same time:
+#     - gdb without python support (add %%global _without_python 1 on top of gdb's SPEC file)
+#     - python-rpm-generators with bootstrapping_python set to 1
+#       (this can be done also during step 2., but should be done before 3.)
+# 2. python3 with with_rewheel set to 0
+# 3. At the same time:
+#     - gdb with python support (remove %%global _without_python 1 on top of gdb's SPEC file)
+#     - python-rpm-generators with bootstrapping_python set to 0
+#       (this can be done at any later step without negative effects)
+# 4. rpm
+# 5. python-setuptools with bootstrap set to 1
+# 6. python-pip with build_wheel set to 0
+# 7. python-wheel with %%bcond_without bootstrap
+# 8. python-setuptools with bootstrap set to 0 and also with_check set to 0
+# 9. python-pip with build_wheel set to 1
+# 10. pyparsing
+# 11. python3 with with_rewheel set to 1
+#
+# Then the most important packages have to be built, starting from their
+# various leaf dependencies recursively. After these have been built, a
+# targeted rebuild should be requested for the rest.
+#
+# Currently these packages are recommended to have been built before a targeted
+# rebuild after a python abi change:
+#   python-sphinx, pytest, python-requests, cloud-init, dnf, anaconda, abrt
+
+%global with_rewheel 1
+
 %global pybasever 3.6
 
 # pybasever without the dot:
@@ -37,7 +71,7 @@
 # now has bytecode at:
 #   foo/__pycache__/bar.cpython-36.pyc
 #   foo/__pycache__/bar.cpython-36.opt-1.pyc
-#   foo/__pycache__/bar.cpython-36.opt-2.pyc
+#	foo/__pycache__/bar.cpython-36.opt-2.pyc
 %global bytecode_suffixes .cpython-36*.pyc
 
 # Python's configure script defines SOVERSION, and this is used in the Makefile
@@ -103,7 +137,7 @@
 Summary: Version 3 of the Python programming language aka Python 3000
 Name: python%{pyshortver}u
 Version: %{pybasever}.2
-Release: 1.ius%{?dist}
+Release: 2.ius%{?dist}
 License: Python
 Group: Development/Languages
 
@@ -165,12 +199,17 @@ BuildRequires: valgrind-devel
 BuildRequires: xz-devel
 BuildRequires: zlib-devel
 
+%if 0%{?with_rewheel}
+BuildRequires: python36u-setuptools
+BuildRequires: python36u-pip
+%endif
+
 
 # =======================
 # Source code and patches
 # =======================
 
-Source: https://www.python.org/ftp/python/%{version}/Python-%{version}.tar.xz
+Source0: https://www.python.org/ftp/python/%{version}/Python-%{version}.tar.xz
 
 # Supply an RPM macro "py_byte_compile" for the python3-devel subpackage
 # to enable specfiles to selectively byte-compile individual files and paths
@@ -194,17 +233,6 @@ Source7: pyfuntop.stp
 # Run in check section with Python that is currently being built
 # Written by bkabrda
 Source8: check-pyc-and-pyo-timestamps.py
-
-# Supply various useful macros for building python 3.X modules:
-#  __python3Xu, python3Xu_sitelib, python3Xu_sitearch
-Source10: macros.python%{pybasever}
-
-%if 0%{?setuptools_version:1}
-Source20: https://files.pythonhosted.org/packages/py2.py3/s/setuptools/setuptools-%{setuptools_version}-py2.py3-none-any.whl
-%endif
-%if 0%{?pip_version:1}
-Source21: https://files.pythonhosted.org/packages/py2.py3/p/pip/pip-%{pip_version}-py2.py3-none-any.whl
-%endif
 
 # Fixup distutils/unixccompiler.py to remove standard library path from rpath:
 # Was Patch0 in ivazquez' python3000 specfile:
@@ -330,6 +358,15 @@ Patch178: 00178-dont-duplicate-flags-in-sysconfig.patch
 # Not appropriate for upstream, Fedora-specific naming
 Patch180: 00180-python-add-support-for-ppc64p7.patch
 
+# 00186 #
+# Fix for https://bugzilla.redhat.com/show_bug.cgi?id=1023607
+# Previously, this fixed a problem where some *.py files were not being
+# bytecompiled properly during build. This was result of py_compile.compile
+# raising exception when trying to convert test file with bad encoding, and
+# thus not continuing bytecompilation for other files.
+# This was fixed upstream, but the test hasn't been merged yet, so we keep it
+Patch186: 00186-dont-raise-from-py_compile.patch
+
 # 00188 #
 # Downstream only patch that should be removed when we compile all guaranteed
 # hashlib algorithms properly. The problem is this:
@@ -344,6 +381,12 @@ Patch180: 00180-python-add-support-for-ppc64p7.patch
 #   (most importantly logging level) is not overriden. That means that a test
 #   relying on this will fail (test_filename_changing_on_output_single_dir)
 Patch188: 00188-fix-lib2to3-tests-when-hashlib-doesnt-compile-properly.patch
+
+# 00189 #
+# Add the rewheel module, allowing to recreate wheels from already installed
+# ones
+# https://github.com/bkabrda/rewheel
+Patch189: 00189-add-rewheel-module.patch
 
 # 00205 #
 # LIBPL variable in makefile takes LIBPL from configure.ac
@@ -362,10 +405,50 @@ Patch206: 00206-remove-hf-from-arm-triplet.patch
 # Fedora needs the default mips64-linux-gnu
 Patch243: 00243-fix-mips64-triplet.patch
 
+# 00251
+# Set values of prefix and exec_prefix in distutils install command
+# to /usr/local if executable is /usr/bin/python* and RPM build
+# is not detected to make pip and distutils install into separate location
+# Fedora Change: https://fedoraproject.org/wiki/Changes/Making_sudo_pip_safe
+# Patch251: 00251-change-user-install-location.patch
+
 # 00252
 # Add executable option to install.py command to make it work for
 # scripts specified as an entry_points
 Patch252: 00252-add-executable-option.patch
+
+# 00262 #
+# Backport of PEP 538: Coercing the legacy C locale to a UTF-8 based locale
+# https://www.python.org/dev/peps/pep-0538/
+# Fedora Change: https://fedoraproject.org/wiki/Changes/python3_c.utf-8_locale
+# Original proposal: https://bugzilla.redhat.com/show_bug.cgi?id=1404918
+Patch262: 00262-pep538_coerce_legacy_c_locale.patch
+
+# 00264 #
+# test_pass_by_value was added in Python 3.6.1 and on aarch64
+# it is catching an error that was there, but wasn't tested before.
+# Therefore skipping the test on aarch64 until fixed upstream.
+# Reported upstream: http://bugs.python.org/issue29804
+Patch264: 00264-skip-test-failing-on-aarch64.patch
+
+# 00270 #
+# Fix test_alpn_protocols from test_ssl as openssl > 1.1.0f
+# changed the behaviour of the ALPN hook.
+# Fixed upstream: http://bugs.python.org/issue30714
+Patch270: 00270-fix-ssl-alpn-hook-test.patch
+
+# 00271 #
+# Make test_asyncio to not depend on the current signal handler
+# as this can make it hang on koji, since it ignores SIGHUP.
+# Reported upstream: http://bugs.python.org/issue31034
+Patch271: 00271-asyncio-get-default-signal-handler.patch
+
+# 00272 #
+# Reject newline characters in ftplib.FTP.putline() arguments to
+# avoid FTP protocol stream injection via malicious URLs.
+# rhbz#1478916
+# Fixed upstream: http://bugs.python.org/issue30119
+Patch272: 00272-fix-ftplib-to-reject-newlines.patch
 
 # 00900 #
 Patch900: 00900-skip-tan0064-32bit.patch
@@ -383,6 +466,7 @@ Patch900: 00900-skip-tan0064-32bit.patch
 # it should be ppc64le-linux-gnu/ppc64-linux-gnu instead powerpc64le-linux-gnu/powerpc64-linux-gnu
 Patch5001: python3-powerppc-arch.patch
 
+BuildRoot: %{_tmppath}/%{name}-%{version}-root
 
 # ======================================================
 # Additional metadata, and subpackages
@@ -395,6 +479,10 @@ Provides: python(abi) = %{pybasever}
 
 Requires: %{name}-libs%{?_isa} = %{version}-%{release}
 
+%if 0%{with_rewheel}
+Requires: python36u-setuptools
+Requires: python36u-pip
+%endif
 
 %description
 Python 3 is a new version of the language that is incompatible with the 2.x
@@ -426,6 +514,10 @@ Summary: Libraries and header files needed for Python 3 development
 Group: Development/Libraries
 Requires: %{name} = %{version}-%{release}
 Requires: %{name}-libs%{?_isa} = %{version}-%{release}
+BuildRequires: python-rpm-macros
+Requires: python-rpm-macros
+Requires: python36u-rpm-macros
+Requires: python36u-rpm-generators
 Conflicts: %{name} < %{version}-%{release}
 
 %description devel
@@ -531,15 +623,9 @@ rm -r Modules/zlib || exit 1
 #    rm Modules/$f
 #done
 
-%if 0%{?setuptools_version:1}
-sed -r -e '/^_SETUPTOOLS_VERSION =/ s/"[0-9.]+"/"%{setuptools_version}"/' -i Lib/ensurepip/__init__.py
-rm Lib/ensurepip/_bundled/setuptools-*.whl
-cp -a %{SOURCE20} Lib/ensurepip/_bundled/
-%endif
-%if 0%{?pip_version:1}
-sed -r -e '/^_PIP_VERSION =/ s/"[0-9.]+"/"%{pip_version}"/' -i Lib/ensurepip/__init__.py
-rm Lib/ensurepip/_bundled/pip-*.whl
-cp -a %{SOURCE21} Lib/ensurepip/_bundled/
+%if 0%{with_rewheel}
+%global pip_version 9.0.1
+sed -r -i s/'_PIP_VERSION = "[0-9.]+"'/'_PIP_VERSION = "%{pip_version}"'/ Lib/ensurepip/__init__.py
 %endif
 
 #
@@ -566,12 +652,28 @@ cp -a %{SOURCE21} Lib/ensurepip/_bundled/
 %patch170 -p1
 %patch178 -p1
 %patch180 -p1
+%patch186 -p1
 %patch188 -p1
+
+%if 0%{with_rewheel}
+%patch189 -p1
+%endif
 
 %patch205 -p1
 %patch206 -p1
 %patch243 -p1
+# %patch251 -p1
 %patch252 -p1
+%patch262 -p1
+
+%ifarch aarch64
+%patch264 -p1
+%endif
+
+%patch270 -p1
+%patch271 -p1
+%patch272 -p1
+
 %patch900 -p1
 
 # Currently (2010-01-15), http://docs.python.org/library is for 2.6, and there
@@ -672,7 +774,11 @@ BuildPython debug \
 BuildPython optimized \
   python \
   python%{pybasever} \
+%ifarch %{ix86} x86_64
+  "--without-ensurepip --enable-optimizations" \
+%else
   "--without-ensurepip" \
+%endif
   true
 
 # ======================================================
@@ -895,9 +1001,8 @@ find %{buildroot} \
     -perm 555 -exec chmod 755 {} \;
 
 # Install macros for rpm:
-mkdir -p %{buildroot}/%{rpmmacrodir}
-install -m 644 %{SOURCE3} %{buildroot}/%{rpmmacrodir}
-install -m 644 %{SOURCE10} %{buildroot}/%{rpmmacrodir}
+mkdir -p %{buildroot}/%{_rpmconfigdir}/macros.d/
+install -m 644 %{SOURCE3} %{buildroot}/%{_rpmconfigdir}/macros.d/
 
 # Ensure that the curses module was linked against libncursesw.so, rather than
 # libncurses.so (bug 539917)
@@ -963,13 +1068,24 @@ sed \
 
 %endif # with_systemtap
 
-# Rename the script that differs on different arches to arch specific name
+# Rename the -devel script that differs on different arches to arch specific name
 mv %{buildroot}%{_bindir}/python%{LDVERSION_optimized}-{,`uname -m`-}config
 echo -e '#!/bin/sh\nexec `dirname $0`/python%{LDVERSION_optimized}-`uname -m`-config "$@"' > \
   %{buildroot}%{_bindir}/python%{LDVERSION_optimized}-config
 echo '[ $? -eq 127 ] && echo "Could not find python%{LDVERSION_optimized}-`uname -m`-config. Look around to see available arches." >&2' >> \
   %{buildroot}%{_bindir}/python%{LDVERSION_optimized}-config
   chmod +x %{buildroot}%{_bindir}/python%{LDVERSION_optimized}-config
+
+
+%if 0%{?with_debug_build}
+# Rename the -debug script that differs on different arches to arch specific name
+mv %{buildroot}%{_bindir}/python%{LDVERSION_debug}-{,`uname -m`-}config
+echo -e '#!/bin/sh\nexec `dirname $0`/python%{LDVERSION_debug}-`uname -m`-config "$@"' > \
+  %{buildroot}%{_bindir}/python%{LDVERSION_debug}-config
+echo '[ $? -eq 127 ] && echo "Could not find python%{LDVERSION_debug}-`uname -m`-config. Look around to see available arches." >&2' >> \
+  %{buildroot}%{_bindir}/python%{LDVERSION_debug}-config
+  chmod +x %{buildroot}%{_bindir}/python%{LDVERSION_debug}-config
+%endif # with_debug_build
 
 # make altinstall doesn't create python3.X-config, but we want it
 #  (we don't want to have just python3.Xm-config, that's a bit confusing)
@@ -1020,7 +1136,7 @@ CheckPython() {
   #   aarch64, see upstream bug http://bugs.python.org/issue21131
   WITHIN_PYTHON_RPM_BUILD= \
   LD_LIBRARY_PATH=$ConfDir $ConfDir/python -m test.regrtest \
-    --verbose --findleaks \
+    -wW --slowest --verbose --findleaks \
     -x test_distutils \
     %ifarch ppc64le aarch64
     -x test_faulthandler \
@@ -1048,6 +1164,14 @@ CheckPython optimized
 
 
 # ======================================================
+# Cleaning up
+# ======================================================
+
+%clean
+rm -fr %{buildroot}
+
+
+# ======================================================
 # Scriptlets
 # ======================================================
 
@@ -1057,6 +1181,7 @@ CheckPython optimized
 
 
 %files
+%defattr(-, root, root)
 %license LICENSE
 %doc README.rst
 %{_bindir}/pydoc*
@@ -1066,6 +1191,7 @@ CheckPython optimized
 %{_mandir}/*/*
 
 %files libs
+%defattr(-,root,root,-)
 %license LICENSE
 %doc README.rst
 
@@ -1095,7 +1221,14 @@ CheckPython optimized
 %dir %{pylibdir}/ensurepip/__pycache__/
 %{pylibdir}/ensurepip/*.py
 %{pylibdir}/ensurepip/__pycache__/*%{bytecode_suffixes}
-%{pylibdir}/ensurepip/_bundled
+%exclude %{pylibdir}/ensurepip/_bundled
+
+%if 0%{?with_rewheel}
+%dir %{pylibdir}/ensurepip/rewheel/
+%dir %{pylibdir}/ensurepip/rewheel/__pycache__/
+%{pylibdir}/ensurepip/rewheel/*.py
+%{pylibdir}/ensurepip/rewheel/__pycache__/*%{bytecode_suffixes}
+%endif
 
 %{pylibdir}/idlelib
 
@@ -1221,6 +1354,7 @@ CheckPython optimized
 %{pylibdir}/distutils/__pycache__/*%{bytecode_suffixes}
 %{pylibdir}/distutils/README
 %{pylibdir}/distutils/command
+%exclude %{pylibdir}/distutils/command/wininst-*.exe
 
 %dir %{pylibdir}/email/
 %dir %{pylibdir}/email/__pycache__/
@@ -1282,8 +1416,10 @@ CheckPython optimized
 %endif
 
 %files devel
+%defattr(-,root,root)
 %{pylibdir}/config-%{LDVERSION_optimized}-%{_arch}-linux%{_gnu}/*
 %exclude %{pylibdir}/config-%{LDVERSION_optimized}-%{_arch}-linux%{_gnu}/Makefile
+%{pylibdir}/distutils/command/wininst-*.exe
 %{_includedir}/python%{LDVERSION_optimized}/*.h
 %exclude %{_includedir}/python%{LDVERSION_optimized}/%{_pyconfig_h}
 %doc Misc/README.valgrind Misc/valgrind-python.supp Misc/gdbinit
@@ -1292,16 +1428,17 @@ CheckPython optimized
 %{_bindir}/python%{LDVERSION_optimized}-*-config
 %{_libdir}/pkgconfig/python-%{LDVERSION_optimized}.pc
 %{_libdir}/pkgconfig/python-%{pybasever}.pc
-%{rpmmacrodir}/macros.pybytecompile%{pybasever}
-%{rpmmacrodir}/macros.python%{pybasever}
+%{_rpmconfigdir}/macros.d/macros.pybytecompile%{pybasever}
 
 %files tools
+%defattr(-,root,root,755)
 %{_bindir}/2to3-%{pybasever}
 %{_bindir}/idle*
 %{pylibdir}/Tools
 %doc %{pylibdir}/Doc
 
 %files tkinter
+%defattr(-,root,root,755)
 %{pylibdir}/tkinter
 %exclude %{pylibdir}/tkinter/test
 %{dynload_dir}/_tkinter.%{SOABI_optimized}.so
@@ -1314,6 +1451,7 @@ CheckPython optimized
 %{pylibdir}/turtledemo/__pycache__/*%{bytecode_suffixes}
 
 %files test
+%defattr(-, root, root)
 %{pylibdir}/ctypes/test
 %{pylibdir}/distutils/tests
 %{pylibdir}/sqlite3/test
@@ -1335,6 +1473,7 @@ CheckPython optimized
 
 %if 0%{?with_debug_build}
 %files debug
+%defattr(-,root,root,-)
 
 # Analog of the core subpackage's files:
 %{_bindir}/python%{LDVERSION_debug}
@@ -1413,7 +1552,6 @@ CheckPython optimized
 # do for the regular build above (bug 531901), since they're all in one package
 # now; they're listed below, under "-devel":
 
-%{_libdir}/libpython%{LDVERSION_debug}.so
 %{_libdir}/%{py_INSTSONAME_debug}
 %if 0%{?with_systemtap}
 %dir %(dirname %{tapsetdir})
@@ -1425,6 +1563,9 @@ CheckPython optimized
 %{pylibdir}/config-%{LDVERSION_debug}-%{_arch}-linux%{_gnu}
 %{_includedir}/python%{LDVERSION_debug}
 %{_bindir}/python%{LDVERSION_debug}-config
+%{_bindir}/python%{LDVERSION_debug}-*-config
+%{_libdir}/libpython%{LDVERSION_debug}.so
+%{_libdir}/libpython%{LDVERSION_debug}.so.1.0
 %{_libdir}/pkgconfig/python-%{LDVERSION_debug}.pc
 
 # Analog of the -tools subpackage's files:
@@ -1455,12 +1596,19 @@ CheckPython optimized
 # (if it doesn't, then the rpmbuild ought to fail since the debug-gdb.py
 # payload file would be unpackaged)
 
+# Workaround for rhbz#1476593
+%undefine _debuginfo_subpackages
 
 # ======================================================
 # Finally, the changelog:
 # ======================================================
 
 %changelog
+* Mon Aug 14 2017 Frankie Dintino <fdintino@gmail.com> - 3.6.2-2.ius
+- Re-add several patches from upstream (e.g. rewheel), re-add dep to
+  python-rpm-macros)
+- Use distgit repo structure (all sources and specs in top-level dir)
+
 * Tue Jul 18 2017 Carl George <carl.george@rackspace.com> - 3.6.2-1.ius
 - Latest upstream
 - Rebase patch180
